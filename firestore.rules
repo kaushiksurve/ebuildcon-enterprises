@@ -1,0 +1,184 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// This security rules file assumes the following data structures:
+//
+// Collection: orders
+// Document ID: Numeric order ID as string (e.g., "101", "1730663456789")
+// Fields:
+//   - id: number (required, > 0, immutable) - Unique order identifier
+//   - name: string (required, 1-200 chars) - Party / Shop / Builder Name
+//   - phone: string (required, 10-20 chars) - Party contact phone number
+//   - date: string (required, 4-50 chars) - Delivery Date (DD/MM/YYYY)
+//   - site: string (required, 1-500 chars) - Construction site address
+//   - items: list (required, 1-100 elements) - Ordered items breakdown
+//   - tot: string (required, 1-500 chars) - Summary text description of order totals
+//   - status: string (required, enum: Pending, Confirmed, Dispatched, Delivered, Cancelled)
+//   - createdAt: string (optional, 1-100 chars, immutable) - ISO timestamp of order creation
+//   - del: string (optional, 0-500 chars) - Delivery location details
+//   - maps: string (optional, 0-500 chars) - Google Maps coordinates or URL
+//   - driverName: string (optional, 0-100 chars) - Name of assigned delivery driver
+//   - driverPhone: string (optional, 0-25 chars) - Contact number of delivery driver
+//   - vehicleType: string (optional, 0-100 chars) - Assigned vehicle model / capacity
+//   - origDate: string (optional, 0-50 chars) - Original delivery date before rescheduling
+//   - origDel: string (optional, 0-500 chars) - Original delivery location before address update
+//   - supName: string (optional, 0-100 chars) - Site supervisor name
+//   - supPhone: string (optional, 0-25 chars) - Site supervisor phone
+//   - userId: string (optional, 0-100 chars, immutable) - Associated builder/user profile ID
+//
+// Collection: users
+// Document ID: Builder profile ID (e.g., "usr_9819927174", "usr_9819927174_1730663456789")
+// Fields:
+//   - id: string (required, 3-100 chars, immutable, matches document ID)
+//   - name: string (required, 1-150 chars) - Builder / Shop Name
+//   - phone: string (required, 10-20 chars) - Builder primary contact phone
+//   - pin: string (required, 4-20 chars) - Builder security login PIN
+//   - supervisorName: string (optional, 0-100 chars) - Default site supervisor name
+//   - supervisorPhone: string (optional, 0-25 chars) - Default site supervisor phone
+//   - siteAddress: string (optional, 0-500 chars) - Default site address
+//   - deliveryLocation: string (optional, 0-500 chars) - Default delivery landmark/location
+//   - rememberMe: bool (optional) - Session persistence preference
+//   - createdAt: string (optional, 0-100 chars, immutable) - Registration ISO timestamp
+//   - lastLoginAt: string (optional, 0-100 chars) - Last login ISO timestamp
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    // Check if user is authenticated with Firebase Auth
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if the request contains all required fields
+    function hasRequiredFields(data, fields) {
+      return data.keys().hasAll(fields);
+    }
+
+    // Check if the request contains only allowed fields (prevents schema pollution)
+    function hasOnlyAllowedFields(data, fields) {
+      return data.keys().hasOnly(fields);
+    }
+
+    // Check if an optional string field, if present, is of string type and within bounded length
+    function isValidOptionalString(data, field, maxLen) {
+      return !(field in data) ||
+             (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    // ===============================================================
+    // Domain Validators (Validator Function Pattern)
+    // ===============================================================
+
+    // Validates order documents on both create and update operations
+    function isValidOrder(data) {
+      return hasRequiredFields(data, ['id', 'name', 'phone', 'date', 'site', 'items', 'tot', 'status']) &&
+             hasOnlyAllowedFields(data, [
+               'id', 'name', 'phone', 'date', 'site', 'items', 'tot', 'status',
+               'createdAt', 'del', 'maps', 'driverName', 'driverPhone', 'vehicleType',
+               'origDate', 'origDel', 'supName', 'supPhone', 'userId'
+             ]) &&
+             data.id is number && data.id > 0 &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 200 &&
+             data.phone is string && data.phone.size() >= 10 && data.phone.size() <= 20 &&
+             data.date is string && data.date.size() >= 4 && data.date.size() <= 50 &&
+             data.site is string && data.site.size() > 0 && data.site.size() <= 500 &&
+             data.tot is string && data.tot.size() > 0 && data.tot.size() <= 500 &&
+             data.status is string && data.status in ['Pending', 'Confirmed', 'Dispatched', 'Delivered', 'Cancelled'] &&
+             data.items is list && data.items.size() > 0 && data.items.size() <= 100 &&
+             isValidOptionalString(data, 'createdAt', 100) &&
+             isValidOptionalString(data, 'del', 500) &&
+             isValidOptionalString(data, 'maps', 500) &&
+             isValidOptionalString(data, 'driverName', 100) &&
+             isValidOptionalString(data, 'driverPhone', 25) &&
+             isValidOptionalString(data, 'vehicleType', 100) &&
+             isValidOptionalString(data, 'origDate', 50) &&
+             isValidOptionalString(data, 'origDel', 500) &&
+             isValidOptionalString(data, 'supName', 100) &&
+             isValidOptionalString(data, 'supPhone', 25) &&
+             isValidOptionalString(data, 'userId', 100);
+    }
+
+    // Verifies that immutable order fields remain unchanged upon update
+    function areOrderImmutableFieldsUnchanged() {
+      return request.resource.data.id == resource.data.id &&
+             (!('createdAt' in resource.data) || request.resource.data.createdAt == resource.data.createdAt) &&
+             (!('userId' in resource.data) || request.resource.data.userId == resource.data.userId);
+    }
+
+    // Validates builder user documents on both create and update operations
+    function isValidUser(data, userId) {
+      return hasRequiredFields(data, ['id', 'name', 'phone', 'pin']) &&
+             hasOnlyAllowedFields(data, [
+               'id', 'name', 'phone', 'pin', 'supervisorName', 'supervisorPhone',
+               'siteAddress', 'deliveryLocation', 'rememberMe', 'createdAt', 'lastLoginAt'
+             ]) &&
+             data.id is string && data.id.size() >= 3 && data.id.size() <= 100 && data.id == userId &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 150 &&
+             data.phone is string && data.phone.size() >= 10 && data.phone.size() <= 20 &&
+             data.pin is string && data.pin.size() >= 4 && data.pin.size() <= 20 &&
+             (!('rememberMe' in data) || data.rememberMe is bool) &&
+             isValidOptionalString(data, 'supervisorName', 100) &&
+             isValidOptionalString(data, 'supervisorPhone', 25) &&
+             isValidOptionalString(data, 'siteAddress', 500) &&
+             isValidOptionalString(data, 'deliveryLocation', 500) &&
+             isValidOptionalString(data, 'createdAt', 100) &&
+             isValidOptionalString(data, 'lastLoginAt', 100);
+    }
+
+    // Verifies that immutable user fields remain unchanged upon update
+    function areUserImmutableFieldsUnchanged() {
+      return request.resource.data.id == resource.data.id &&
+             (!('createdAt' in resource.data) || request.resource.data.createdAt == resource.data.createdAt);
+    }
+
+    // ===============================================================
+    // Root Default Deny
+    // ===============================================================
+    match /{document=**} {
+      allow read, write: false;
+    }
+
+    // ===============================================================
+    // Collection: orders
+    // ===============================================================
+    match /orders/{orderId} {
+      // Allow customers and company dispatch to read orders in real-time
+      allow read: if true;
+
+      // Allow customers placing new orders with full data validation
+      allow create: if isValidOrder(request.resource.data);
+
+      // Allow company staff or customers to update orders with full validation and immutable field lockdown
+      allow update: if isValidOrder(request.resource.data) && areOrderImmutableFieldsUnchanged();
+
+      // Allow company management to delete orders
+      allow delete: if true;
+    }
+
+    // ===============================================================
+    // Collection: users
+    // ===============================================================
+    match /users/{userId} {
+      // Allow reading user profiles for phone/PIN login and registration checks
+      allow read: if true;
+
+      // Allow builders to sign up with validated profile information
+      allow create: if isValidUser(request.resource.data, userId);
+
+      // Allow builders to update their profiles and last login timestamps
+      allow update: if isValidUser(request.resource.data, userId) && areUserImmutableFieldsUnchanged();
+
+      // Deleting user accounts is strictly prohibited via client application
+      allow delete: if false;
+    }
+  }
+}
